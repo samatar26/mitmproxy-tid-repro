@@ -1,0 +1,53 @@
+name: reproduce mitmproxy tid bug
+on: workflow_dispatch
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install mitmproxy
+        run: |
+          pipx install mitmproxy
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Reproduce
+        run: |
+          python3 target.py &
+          PID=$!
+          sleep 1
+          mitmdump --mode "local:$PID" -s addon.py >/dev/null 2>&1 &
+          MITM=$!
+          wait "$PID"
+          kill -INT "$MITM" 2>/dev/null || true
+
+  fixed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install mitmproxy
+        run: |
+          pipx install "mitmproxy==12.2.3"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build the redirector with ctx.pid() -> ctx.tgid() and swap it in
+        run: |
+          rustup toolchain install nightly --component rust-src
+          cargo install --locked bpf-linker@0.9.15
+          git clone --depth 1 --branch v0.12.9 https://github.com/mitmproxy/mitmproxy_rs /tmp/rs
+          sed -i 's/ctx\.pid()/ctx.tgid()/' /tmp/rs/mitmproxy-linux-ebpf/src/main.rs
+          (cd /tmp/rs && cargo build --release --locked -p mitmproxy-linux)
+          REDIR="$(dirname "$(readlink -f "$(which mitmdump)")")/mitmproxy-linux-redirector"
+          cp /tmp/rs/target/release/mitmproxy-linux-redirector "$REDIR"
+
+      - name: Reproduce (now both intercepted)
+        run: |
+          python3 target.py &
+          PID=$!
+          sleep 1
+          mitmdump --mode "local:$PID" -s addon.py >/dev/null 2>&1 &
+          MITM=$!
+          wait "$PID"
+          kill -INT "$MITM" 2>/dev/null || true
